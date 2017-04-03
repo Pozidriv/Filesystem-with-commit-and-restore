@@ -122,13 +122,14 @@ void mkssfs(int fresh){
       sb->num_inodes = 1;                          // We start with 1 i-node for the root dir
       sb->current_root.size = sizeof(inode_t);     // Root is thus of size inode_t ??????
 
-      // Write current root to fdt[0]
+      // Write current root to fdt[0]. It's a special entry, so we don't care if id is 0
       new_fdt_entry(sb->current_root, -1);
 
-      // Creating root dir inode
+      // Creating root dir inode and placing it in first i-node block
       inode_block_t *ib = calloc(BLOCK_SIZE, 1);   // Allocate a block for the inodes         (4)
       ib->inodes[0].d_ptrs[0] = DEFAULT_ROOT_DIR_BLOCK; // inode 0 now points to root dir
-      write_blocks(DEFAULT_NODE_TABLE_BLOCK, 1, ib);   // Write inode table
+      new_fdt_entry(ib->inodes[0], 0);                  // Add root dir in FDT (at index 1)
+      write_blocks(DEFAULT_INODE_TABLE_BLOCK, 1, ib);   // Write inode table
       free(ib);                                    // Free                                    (4)
 
       sb->current_root.d_ptrs[0] = DEFAULT_INODE_TABLE_BLOCK; // Point to first inode table block
@@ -186,15 +187,13 @@ int ssfs_fopen(char *name){
    b_ptr_t block_ptr = 0;
 
    while(addr.d_ptr*num_entries + addr.offset < sb->num_inodes) {
- 
-      if((addr.d_ptr == -1 && addr.offset == 0) || (addr.offset == num_entries)) {
-         // If first iteration or end of current block
+      addr.d_ptr++;                             // Increment block count
+      addr.offset = 0;                          // Reset offset
+      printf("[DEBUG|ssfs_open] Search at B: %d; O: %d\n", addr.d_ptr, addr.offset);
 
-         addr.d_ptr++;                             // Increment block count
-         addr.offset = 0;                          // Reset offset
-         printf("[DEBUG|ssfs_open] Search at B: %d; O: %d\n", addr.d_ptr, addr.offset);
-         block_ptr = get_block_id(&sb->current_root, addr.d_ptr); // Update block pointer
-         read_blocks(block_ptr, 1, dir_block);     // Retrieve dir block
+      if(ssfs_fread(1, dir_block, BLOCK_SIZE) == -1) { // If read fails -> end of dir file
+         printf("[DEBUG|ssfs_open] File not found. At B: %d; O: %d\n", addr.d_ptr, addr.offset);
+         break;
       }
 
       if(strcmp(name, dir_block->files[addr.offset].filename) == 0) { // Compare filename
@@ -206,19 +205,8 @@ int ssfs_fopen(char *name){
    }
 
    if(inode_id == -1) {                            // File does not exist
-      printf("[DEBUG|ssfs_open] File not found. At B: %d; O: %d\n", addr.d_ptr, addr.offset);
       // Need to create a file
-                                                   // Note: inode is currently empty (calloc)
-
-      if(addr.offset == num_entries) {             // If at end of dir block
-         addr.d_ptr++;                             // Increment block count
-         addr.offset = 0;                          // Reset offset
-         printf("[DEBUG|ssfs_open] Block end reached. At B: %d; O: %d\n", addr.d_ptr, addr.offset);
-         b_ptr_t new_block = get_unused_block();   //   Get a new block to write to
-         sb->current_root.d_ptrs[addr.d_ptr] = new_block;//  Update the j-node
-      }
       ssfs_fwrite(0, (char*) inode, sizeof(inode_t));// Write inode to appropriate block
-
    } else {                                        // File exists
       //inode = dir_block->files[addr.offset];
    }
@@ -332,8 +320,9 @@ int ssfs_remove(char *file){
 /**********************************************************************************************/
 
 b_ptr_t get_block_id(inode_t *inode, int d_ptr_id) {
-   if(d_ptr_id > MAX_DIRECT_PTR + BLOCK_SIZE/sizeof(b_ptr_t)) {
+   if(d_ptr_id > (MAX_DIRECT_PTR + BLOCK_SIZE/sizeof(b_ptr_t))) {
       printf("[DEBUG|get_block_id] d_ptr_id is way too big: %d\n", d_ptr_id);
+      printf("%d\n", MAX_DIRECT_PTR + (BLOCK_SIZE/sizeof(b_ptr_t)));
       return -1;
    }
    if(d_ptr_id > MAX_DIRECT_PTR) {              // Need to look into indirect ptr
@@ -414,6 +403,7 @@ int new_fdt_entry(inode_t inode, int inode_id) {// Creates a new entry in the FD
 //       new_entry->read_ptr = { .d_ptr = 0, offset = 0 };// Unnecessary because of calloc
          new_entry->write_ptr = bytes_to_virt_addr(inode.size);
 
+         fdt[i] = new_entry;
          printf("[DEBUG|new_fdt_entry] Entry created: %d\n", i);
          return i;
       }

@@ -24,8 +24,8 @@
 
 typedef int b_ptr_t;                // Pointer to a disk block
 
-typedef struct _virt_addr_t {       // Actual address in the disk
-   int d_ptr;                       // Direct pointer number
+typedef struct _virt_addr_t {       // Address in inode
+   int d_ptr;                       // Index of direct pointer number
    int offset;                      // Offset (can be whatever you want it to be: bytes, index, ...)
 } virt_addr_t;
 
@@ -79,13 +79,13 @@ typedef struct _inode_block_t {
 /*************************************************************************/
 
 b_ptr_t get_unused_block();// Gets an unused block (according to some strategy)
+int add_new_block(inode_t*, int, int, b_ptr_t, super_block_t*); // Adds specified block to pointed sb
+int get_free_inode();               // Gets a free inode (according to some strategy)
 int new_fdt_entry(inode_t, int);    // Creates a new entry in the FDT
 
 int virt_addr_to_bytes(virt_addr_t);// Converts a virtual address it's bytes number
 virt_addr_t bytes_to_virt_addr(int);// Converts a byte number to a virtual address
 b_ptr_t get_block_id(inode_t*, int);// Safe conversion of pointer index to block pointer
-
-int add_new_block(inode_t*, int, int, b_ptr_t, super_block_t*); // Adds specified block to pointed sb
 
 /**************************************************************************/
 
@@ -181,31 +181,35 @@ int ssfs_fopen(char *name){
 
    // Check if file exists
    int inode_id = -1;                              // ID of the inode in the inode list yz6619
-   virt_addr_t addr = { .d_ptr = -1, .offset = 0 };// Offset is used as the number of entries here
+   virt_addr_t addr = { .d_ptr = 0, .offset = 0 }; // Offset is used as the number of entries here
    int num_entries = BLOCK_SIZE/DIR_ENTRY_SIZE;
    dir_t *dir_block = malloc(BLOCK_SIZE);          // malloc                                  (6)
-   b_ptr_t block_ptr = 0;
 
    while(addr.d_ptr*num_entries + addr.offset < sb->num_inodes) {
-      addr.d_ptr++;                             // Increment block count
-      addr.offset = 0;                          // Reset offset
       printf("[DEBUG|ssfs_open] Search at B: %d; O: %d\n", addr.d_ptr, addr.offset);
 
-      if(ssfs_fread(1, dir_block, BLOCK_SIZE) == -1) { // If read fails -> end of dir file
+      if(ssfs_fread(1, (char*) dir_block, BLOCK_SIZE) == -1) { // If read fails -> end of dir file
          printf("[DEBUG|ssfs_open] File not found. At B: %d; O: %d\n", addr.d_ptr, addr.offset);
          break;
       }
-
-      if(strcmp(name, dir_block->files[addr.offset].filename) == 0) { // Compare filename
-         printf("[DEBUG|ssfs_open] File found B: %d; O: %d\n", addr.d_ptr, addr.offset);
-         inode_id = addr.d_ptr*num_entries + addr.offset;
-         break;
+      while(addr.offset < num_entries) {
+         if(strcmp(name, dir_block->files[addr.offset].filename) == 0) { // Compare filename
+            printf("[DEBUG|ssfs_open] File found B: %d; O: %d\n", addr.d_ptr, addr.offset);
+            inode_id = addr.d_ptr*num_entries + addr.offset;
+            break;
+         }
+         addr.offset++;
       }
-      addr.offset++;
+      if(inode_id != -1)
+         break;
+      addr.d_ptr++;                                // Increment block count
+      addr.offset = 0;                             // Reset offset
    }
 
    if(inode_id == -1) {                            // File does not exist
       // Need to create a file
+      inode_id = get_free_inode();
+      ssfs_fwseek(0, inode_id*sizeof(inode_t));
       ssfs_fwrite(0, (char*) inode, sizeof(inode_t));// Write inode to appropriate block
    } else {                                        // File exists
       //inode = dir_block->files[addr.offset];
@@ -273,7 +277,7 @@ int ssfs_fwrite(int fileID, char *buf, int length){
 
    while(length > 0) {                             // While there are bytes to write
       int *d_ptr_id = &fdt[fileID]->write_ptr.d_ptr;// Index of direct pointer
-      int b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
+      b_ptr_t b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
       int *offset = &fdt[fileID]->write_ptr.offset;// Get offset
 
       if(b_id == 0) {                              // This means we need to write to a new block
@@ -293,15 +297,13 @@ int ssfs_fwrite(int fileID, char *buf, int length){
 
       memcpy(&current_block[*offset], buf, bytes_to_write);// Write to block
       write_blocks(b_id, 1, current_block);        // Write block to disk
+      free(current_block);                         // Free                                       (9)
 
       // Need to update offset, block num, length, buf
       buf = buf + bytes_to_write;                  // Update buf
       length -= bytes_to_write;                    // Update length of buf
-      *offset = (*offset + bytes_to_write) % BLOCK_SIZE; // Update offset (if whole block is written then offest will be reset to 0)          
-      if(*offset == 0) {
-         printf("[DEBUG|ssfs_fwrite] Incrementing direct pointer: %d\n", *d_ptr_id);
-         (*d_ptr_id)++;                            // Update write d_ptr
-      }
+      fdt[fileID]->inode.size += bytes_to_write;   // Increment size of file before moving wptr
+      ssfs_fwseek(fileID, virt_addr_to_bytes(fdt[fileID]->write_ptr) + bytes_to_write);// move wptr
    }
 
    free(sb);                                       //                                           (10)
@@ -311,8 +313,33 @@ int ssfs_fwrite(int fileID, char *buf, int length){
 }
 
 int ssfs_fread(int fileID, char *buf, int length){
-    return 0;
+   if(fdt[fileID] == NULL) {
+      printf("[DEBUG|ssfs_fread] fdt[%d] is NULL\n", fileID);
+      return -1;
+   }
+   if(fdt[fileID]->inode.size < virt_addr_to_bytes(fdt[fileID]->read_ptr) + length) {
+      printf("[DEBUG|ssfs_fread] Read too big. FS: %d, RP: (%d,%d), L: %d)\n", fdt[fileID]->inode.size, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset, length);
+      return -1;
+   }
+   while(length > 0) {
+      int *d_ptr_id = &fdt[fileID]->read_ptr.d_ptr;// Index of direct pointer
+      b_ptr_t b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
+      int *offset = &fdt[fileID]->write_ptr.offset;// Get offset
+
+      char *current_block = calloc(BLOCK_SIZE, 1); // Allocate a whole block                    (17) 
+      read_blocks(b_id, 1, current_block);         // Retrieve current_block
+
+      // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
+      int bytes_to_read = length < BLOCK_SIZE-*offset ? length : BLOCK_SIZE-*offset;
+      printf("[DEBUG|ssfs_fread] Reading %d bytes into block %d at offset %d\n", bytes_to_read, b_id, *offset);
+
+      memcpy(buf, &current_block[*offset], bytes_to_read);
+
+      ssfs_frseek(fileID, virt_addr_to_bytes(fdt[fileID]->read_ptr) + bytes_to_read);//move rptr
+   }
+   return 0;
 }
+
 int ssfs_remove(char *file){
     return 0;
 }
@@ -320,9 +347,12 @@ int ssfs_remove(char *file){
 /**********************************************************************************************/
 
 b_ptr_t get_block_id(inode_t *inode, int d_ptr_id) {
+   if(d_ptr_id < 0) {
+      printf("[DEBUG|get_block_id] d_ptr_id is negative: %d\n", d_ptr_id);
+      return -1;
+   }
    if(d_ptr_id > (MAX_DIRECT_PTR + BLOCK_SIZE/sizeof(b_ptr_t))) {
       printf("[DEBUG|get_block_id] d_ptr_id is way too big: %d\n", d_ptr_id);
-      printf("%d\n", MAX_DIRECT_PTR + (BLOCK_SIZE/sizeof(b_ptr_t)));
       return -1;
    }
    if(d_ptr_id > MAX_DIRECT_PTR) {              // Need to look into indirect ptr
@@ -393,6 +423,10 @@ virt_addr_t bytes_to_virt_addr(int bytes) {     // Converts a byte number to a v
    return thingy;
 }
 
+int virt_addr_to_bytes(virt_addr_t addr) {      // ASSUMING OFFSET IS IN BYTES
+   return addr.d_ptr*BLOCK_SIZE + addr.offset;
+}
+
 int new_fdt_entry(inode_t inode, int inode_id) {// Creates a new entry in the FDT
    for(int i=0; i<NUM_BLOCKS; i++) {
       if(fdt[i] == NULL) {
@@ -416,11 +450,21 @@ b_ptr_t get_unused_block() {   // Gets an unused block (according to some strate
    read_blocks(FBM_BLOCK, 1, FBM);
 
    for(int i=0; i<BLOCK_SIZE; i++) {
-      if(FBM->mask[i] = 1) {
+      if(FBM->mask[i] == 1) {
          free(FBM);
          return i;
       }
    }
    free(FBM);
    return -1;
+}
+
+int get_free_inode() {          // Gets a free inode and returns its ID
+   // Look into directory for the first gap. Pick that gap.
+   dir_t dir_block = malloc(BLOCK_SIZE);
+   ssfs_frseek(1, 0);                           // Read from beginning of dir
+   while(ssfs_read(1, (char*) dir_block, BLOCK_SIZE) > 0) {
+      // Do stuff
+   }
+   return 0;
 }

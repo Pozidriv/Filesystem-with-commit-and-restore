@@ -193,6 +193,10 @@ int ssfs_fopen(char *name){
 //       printf("[DEBUG|ssfs_fopen] Appending new inode at %d\n", sb->num_inodes);
          inode_id = sb->num_inodes;
       }
+      if(get_unused_block() == -1) {
+         printf("[DEBUG|ssfs_fopen] No more free blocks. Aborting\n");
+         return -1;
+      }
       sb->current_root.size += sizeof(inode_t);    //
       printf("[DEBUG|ssfs_fopen] New inode: %d\n", inode_id);
       ssfs_fwseek(0, inode_id*sizeof(inode_t));
@@ -244,7 +248,7 @@ int ssfs_frseek(int fileID, int loc){
 
    virt_addr_t addr = bytes_to_virt_addr(loc);
    fdt[fileID]->read_ptr = addr;                   
-// printf("[DEBUG|ssfs_frseek] fdt[%d]: read at direct pointer: %d; offset: %d\n", fileID, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset);
+   printf("[DEBUG|ssfs_frseek] fdt[%d]: read at (%d,%d)\n", fileID, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset);
 
    return 0;
 }
@@ -286,6 +290,8 @@ int ssfs_fwrite(int fileID, char *buf, int length){
       printf("[DEBUG|ssfs_fwrite] d_ptr_id is %d\n", *d_ptr_id);
       b_ptr_t b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
       int *offset = &fdt[fileID]->write_ptr.offset;// Get offset
+      if(b_id == -1)
+         return -1;
       printf("[DEBUG|ssfs_fwrite] fileID: %d, length: %d, write at: (%d,%d)\n", fileID, length, *d_ptr_id, *offset);
 
       // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
@@ -293,8 +299,14 @@ int ssfs_fwrite(int fileID, char *buf, int length){
 
       if(b_id == 0) {                              // This means we need to write to a new block
          b_ptr_t new_block = get_unused_block();   // Get a free block to write the rest
+         if(new_block == -1) {
+            printf("[DEBUG|ssfs_fwrite] No more free blocks. Aborting\n");
+            return -1;
+         }
          add_new_block(&fdt[fileID]->inode, inode_id, *d_ptr_id, new_block, sb, bytes_to_write);
          b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);
+         if(b_id == -1)
+            return -1;
       }
 
       if(WM->mask[b_id] == 0) {                    // If block is not writable
@@ -304,7 +316,7 @@ int ssfs_fwrite(int fileID, char *buf, int length){
       char *current_block = calloc(BLOCK_SIZE, 1); // Allocate a whole block                     (9)
       read_blocks(b_id, 1, current_block);         // Retrieve current_block
 
-      printf("[DEBUG|ssfs_fwrite] Writing %d bytes into block %d at offset %d. Left to write: %d\n", bytes_to_write, b_id, *offset, length);
+      printf("[DEBUG|ssfs_fwrite] Writing %d bytes into block %d at offset %d. Left to write: %d\n", bytes_to_write, b_id, *offset, length-bytes_to_write);
 //    printf("block start: %p, my offseted block: %p\n", current_block, &current_block[*offset]);
 
       memcpy(&current_block[*offset], buf, bytes_to_write);// Write to block
@@ -333,7 +345,7 @@ int ssfs_fread(int fileID, char *buf, int length){
 
    int total_bytes_read = 0;
    if(fdt[fileID]->inode.size < virt_addr_to_bytes(fdt[fileID]->read_ptr) + length) {
-      printf("[DEBUG|ssfs_fread] Read too big. FS: %d, RP: (%d,%d), L: %d)\n", fdt[fileID]->inode.size, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset, length);
+//    printf("[DEBUG|ssfs_fread] Read too big. FS: %d, RP: (%d,%d), L: %d)\n", fdt[fileID]->inode.size, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset, length);
       length = fdt[fileID]->inode.size - virt_addr_to_bytes(fdt[fileID]->read_ptr);
    }
    while(length > 0) {
@@ -343,12 +355,15 @@ int ssfs_fread(int fileID, char *buf, int length){
       int *offset = &fdt[fileID]->read_ptr.offset;// Get offset
       printf(", offset: %d\n", *offset);
 
+      if(b_id == -1)
+         return -1;
+
       char *current_block = calloc(BLOCK_SIZE, 1); // Allocate a whole block                    (17) 
       read_blocks(b_id, 1, current_block);         // Retrieve current_block
 
       // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
       int bytes_to_read = length < BLOCK_SIZE-*offset ? length : BLOCK_SIZE-*offset;
-      printf("[DEBUG|ssfs_fread] Reading %d bytes into block %d at offset %d. Left to read: %d\n", bytes_to_read, b_id, *offset, length);
+      printf("[DEBUG|ssfs_fread] Reading %d bytes into block %d at offset %d. Left to read: %d\n", bytes_to_read, b_id, *offset, length-bytes_to_read);
 
       memcpy(buf, &current_block[*offset], bytes_to_read);
       length -= bytes_to_read;
@@ -364,7 +379,7 @@ int ssfs_fread(int fileID, char *buf, int length){
 int ssfs_remove(char *file){
    super_block_t *sb = malloc(BLOCK_SIZE);
    read_blocks(SUPER_BLOCK, 1, sb);
-   int inode_id = get_inode_id(file, sb);
+   int inode_id = get_inode_id(file, sb)+1;
 
    if(inode_id == -1) {
       printf("[DEBUG|ssfs_remove] File not found. Aborting\n");
@@ -391,6 +406,11 @@ int ssfs_remove(char *file){
 
    printf("[DEBUG|ssfs_remove] Inode removed. Now removing directory entry\n");
 
+   char *empty_array = calloc(DIR_ENTRY_SIZE, 1);
+   ssfs_fwseek(1, (inode_id-1)*DIR_ENTRY_SIZE);
+   ssfs_fwrite(1, empty_array, DIR_ENTRY_SIZE);
+
+   free(empty_array);
    free(unused_inode);
    free(sb);
 
@@ -417,7 +437,15 @@ b_ptr_t get_block_id(inode_t *inode, int d_ptr_id) {
 
       b_ptr_t ptr = ptr_file->ptrs[d_ptr_id - MAX_DIRECT_PTR];
       free(ptr_file);                           // Free                                      (13)
+      if(ptr>NUM_BLOCKS) {
+         printf("[DEBUG|get_block_id] Block number out of bounds\n");
+         return -1;
+      }
       return ptr;
+   }
+   if(inode->d_ptrs[d_ptr_id]>NUM_BLOCKS) {
+      printf("[DEBUG|get_block_id] Block number out of bounds\n");
+      return -1;
    }
 
    return inode->d_ptrs[d_ptr_id];
@@ -460,6 +488,9 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
    // Getting the id of the inode table block that contains our inode.
    // Since int division truncates to 0, we do inode_id/number of inodes in a block
    b_ptr_t inode_block_id = get_block_id(&sb->current_root, inode_id/(BLOCK_SIZE/sizeof(inode_t)));
+
+   if(inode_block_id == -1)
+      return -1;
 
    inode_block_t *inode_block = malloc(BLOCK_SIZE);// Malloc                              (15)
    read_blocks(inode_block_id, 1, inode_block); // Retrieve inode block
@@ -537,7 +568,7 @@ int get_inode_id(char *name, super_block_t *sb) {
    int num_entries = BLOCK_SIZE/DIR_ENTRY_SIZE;
    dir_t *dir_block = calloc(BLOCK_SIZE, 1);       // calloc                                  (6)
 
-   printf("[DEBUG|get_inode_id] Searching until direct pointer %d\n", sb->num_inodes/num_entries);
+// printf("[DEBUG|get_inode_id] Searching until direct pointer %d\n", sb->num_inodes/num_entries);
    while(addr.d_ptr*num_entries + addr.offset < sb->num_inodes) {
       printf("[DEBUG|get_inode_id] Search at direct ptr: %d; offset: %d\n", addr.d_ptr, addr.offset);
       ssfs_frseek(1, virt_addr_to_bytes(addr));
@@ -551,6 +582,7 @@ int get_inode_id(char *name, super_block_t *sb) {
          if(strncmp(name, dir_block->files[addr.offset/DIR_ENTRY_SIZE].filename, FILENAME_SIZE) == 0) { // Compare filename
             printf("[DEBUG|get_inode_id] File found. Direct ptr: %d; offset: %d\n", addr.d_ptr, addr.offset);
             inode_id = addr.d_ptr*num_entries + addr.offset;
+            printf("[DEBUG|get_inode_id] Currently looking at: \"%s\", %d\n", dir_block->files[addr.offset/DIR_ENTRY_SIZE].filename, dir_block->files[addr.offset/DIR_ENTRY_SIZE].inode_id);
             break;
          }
          printf("[DEBUG|get_inode_id] Currently looking at: \"%s\", %d\n", dir_block->files[addr.offset/DIR_ENTRY_SIZE].filename, dir_block->files[addr.offset/DIR_ENTRY_SIZE].inode_id);

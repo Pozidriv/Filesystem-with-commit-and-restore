@@ -195,6 +195,8 @@ int ssfs_fopen(char *name){
       }
       if(get_unused_block() == -1) {
          printf("[DEBUG|ssfs_fopen] No more free blocks. Aborting\n");
+         free(sb);                                 // Free                                    (5)
+         free(inode);                              // Free                                    (7)
          return -1;
       }
       sb->current_root.size += sizeof(inode_t);    //
@@ -203,19 +205,25 @@ int ssfs_fopen(char *name){
       ssfs_fwrite(0, (char*) inode, sizeof(inode_t));// Write inode to appropriate block
       sb->num_inodes++;                            // Update inode count
 
-      dir_entry_t *entry = calloc(DIR_ENTRY_SIZE, 1);
+      dir_entry_t *entry = calloc(DIR_ENTRY_SIZE, 1);// Calloc                               (18)
       entry->inode_id = inode_id;
       strcpy(entry->filename, name);
       printf("[DEBUG|ssfs_fopen] Adding entry \"%s\" for inode %d at %d in dir\n", entry->filename, entry->inode_id, (inode_id-1)*DIR_ENTRY_SIZE);
       ssfs_fwseek(1, (inode_id-1)*DIR_ENTRY_SIZE); // Seek to appropriate dir entry
       ssfs_fwrite(1, (char*) entry, DIR_ENTRY_SIZE);
+      free(entry);                                 // Free                                   (18)
    } else {                                        // File exists
-      //inode = dir_block->files[addr.offset];
+      ssfs_frseek(0, inode_id*sizeof(inode_t));
+      ssfs_fread(0, (char*) inode, sizeof(inode_t));
    }
 
    // Create FDT entry
    int fd = new_fdt_entry(*inode, inode_id);
    write_blocks(SUPER_BLOCK, 1, sb);
+   free(sb);                                       // Free                                    (5)
+   free(inode);                                    // Free                                    (7)
+
+   printf("[DEBUG|ssfs_fopen] NEW ENTRY: fdt[%d] has inode %d\n", fd, fdt[fd]->inode_id);
 
    return fd;
 }
@@ -238,7 +246,7 @@ int ssfs_fclose(int fileID){
 
 int ssfs_frseek(int fileID, int loc){
    if(fdt[fileID] == NULL) {
-//    printf("[DEBUG|ssfs_frseek] fileID %d is NULL\n", fileID);
+      printf("[DEBUG|ssfs_frseek] fileID %d is NULL\n", fileID);
       return -1;
    }
    if(fdt[fileID]->inode.size < loc-1 || loc < 0) {  // Bounds checking
@@ -271,7 +279,7 @@ int ssfs_fwseek(int fileID, int loc){
 
 int ssfs_fwrite(int fileID, char *buf, int length){
    if(fdt[fileID] == NULL) {
-//    printf("[DEBUG|ssfs_fwrite] fileID %d is NULL\n", fileID);
+      printf("[DEBUG|ssfs_fwrite] fileID %d is NULL\n", fileID);
       return -1;
    }
    int total_bytes_written = 0;
@@ -290,9 +298,13 @@ int ssfs_fwrite(int fileID, char *buf, int length){
       printf("[DEBUG|ssfs_fwrite] d_ptr_id is %d\n", *d_ptr_id);
       b_ptr_t b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
       int *offset = &fdt[fileID]->write_ptr.offset;// Get offset
-      if(b_id == -1)
+      if(b_id == -1) {
+         free(sb);
+         free(WM);
+         free(FBM);
          return -1;
-      printf("[DEBUG|ssfs_fwrite] fileID: %d, length: %d, write at: (%d,%d)\n", fileID, length, *d_ptr_id, *offset);
+      }
+      printf("[DEBUG|ssfs_fwrite] fileID: %d, inode: %d, length: %d, write at: (%d,%d)\n", fileID, fdt[fileID]->inode_id, length, *d_ptr_id, *offset);
 
       // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
       int bytes_to_write = length < BLOCK_SIZE-*offset ? length : BLOCK_SIZE-*offset;
@@ -301,12 +313,19 @@ int ssfs_fwrite(int fileID, char *buf, int length){
          b_ptr_t new_block = get_unused_block();   // Get a free block to write the rest
          if(new_block == -1) {
             printf("[DEBUG|ssfs_fwrite] No more free blocks. Aborting\n");
+            free(sb);                              // Free                                      (10)
+            free(WM);                              // Free                                      (11)
+            free(FBM);                             // Free                                      (12)
             return -1;
          }
          add_new_block(&fdt[fileID]->inode, inode_id, *d_ptr_id, new_block, sb, bytes_to_write);
          b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);
-         if(b_id == -1)
+         if(b_id == -1) {
+            free(sb);                              // Free                                      (10)
+            free(WM);                              // Free                                      (11)
+            free(FBM);                             // Free                                      (12)
             return -1;
+         }
       }
 
       if(WM->mask[b_id] == 0) {                    // If block is not writable
@@ -327,13 +346,20 @@ int ssfs_fwrite(int fileID, char *buf, int length){
       buf = buf + bytes_to_write;                  // Update buf
       length -= bytes_to_write;                    // Update length of buf
       total_bytes_written += bytes_to_write;
-      fdt[fileID]->inode.size += bytes_to_write;   // Increment size of file before moving wptr
+
+      // Increment size of file before moving wptr (maximum of filesize and write ptr+bytes written)
+      fdt[fileID]->inode.size = fdt[fileID]->inode.size < virt_addr_to_bytes(fdt[fileID]->write_ptr) + bytes_to_write ? virt_addr_to_bytes(fdt[fileID]->write_ptr) + bytes_to_write : fdt[fileID]->inode.size;
       ssfs_fwseek(fileID, virt_addr_to_bytes(fdt[fileID]->write_ptr) + bytes_to_write);// move wptr
    }
+   if(fdt[fileID]->inode_id != -1) {               // If not the j-node
+      printf("[DEBUG|ssfs_write] fdt[%d]: ID %d has size %d\n", fileID, fdt[fileID]->inode_id, fdt[fileID]->inode.size);
+      ssfs_fwseek(0, fdt[fileID]->inode_id*sizeof(inode_t));
+      ssfs_fwrite(0, (char*) &fdt[fileID]->inode, sizeof(inode_t)); // Update inode
+   }
 
-   free(sb);                                       //                                           (10)
-   free(WM);                                       //                                           (11)
-   free(FBM);                                      //                                           (12)
+   free(sb);                                       // Free                                      (10)
+   free(WM);                                       // Free                                      (11)
+   free(FBM);                                      // Free                                      (12)
    return total_bytes_written;
 }
 
@@ -345,12 +371,12 @@ int ssfs_fread(int fileID, char *buf, int length){
 
    int total_bytes_read = 0;
    if(fdt[fileID]->inode.size < virt_addr_to_bytes(fdt[fileID]->read_ptr) + length) {
-//    printf("[DEBUG|ssfs_fread] Read too big. FS: %d, RP: (%d,%d), L: %d)\n", fdt[fileID]->inode.size, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset, length);
+      printf("[DEBUG|ssfs_fread] Read too big. FS: %d, RP: (%d,%d), L: %d)\n", fdt[fileID]->inode.size, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset, length);
       length = fdt[fileID]->inode.size - virt_addr_to_bytes(fdt[fileID]->read_ptr);
    }
    while(length > 0) {
       int *d_ptr_id = &fdt[fileID]->read_ptr.d_ptr;// Index of direct pointer
-      printf("[DEBUG|ssfs_fread] Reading fileID: %d, Direct pointer: %d", fileID, *d_ptr_id);
+      printf("[DEBUG|ssfs_fread] Reading fileID: %d, inode: %d, Direct pointer: %d", fileID, fdt[fileID]->inode_id, *d_ptr_id);
       b_ptr_t b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
       int *offset = &fdt[fileID]->read_ptr.offset;// Get offset
       printf(", offset: %d\n", *offset);
@@ -372,7 +398,7 @@ int ssfs_fread(int fileID, char *buf, int length){
       ssfs_frseek(fileID, virt_addr_to_bytes(fdt[fileID]->read_ptr) + bytes_to_read);//move rptr
       free(current_block);                         // Free                                      (17)
    }
-   printf("[DEBUG|ssfs_fread] End of read fileID: %d, size of read: %d, read pointer at (%d,%d)\n", fileID, total_bytes_read, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset);
+   printf("[DEBUG|ssfs_fread] End of read fileID: %d, inode: %d, size of read: %d, read pointer at (%d,%d)\n", fileID, fdt[fileID]->inode_id, total_bytes_read, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset);
    return total_bytes_read;
 }
 
@@ -547,18 +573,20 @@ b_ptr_t get_unused_block() {   // Gets an unused block (according to some strate
 
 int get_free_inode() {          // Gets a free inode and returns its ID
    // Look into directory for the first gap. Pick that gap.
-   inode_block_t *inode_block = malloc(BLOCK_SIZE);
+   inode_block_t *inode_block = calloc(BLOCK_SIZE, 1);
    ssfs_frseek(0, 0);                           // Read from beginning of root
    int d_ptr = 0;
    while(ssfs_fread(0, (char*) inode_block, BLOCK_SIZE) > 0) {
       for(int i=0; i<BLOCK_SIZE/sizeof(inode_t); i++) {
          if(inode_block->inodes[i].size == -1) {
             free(inode_block);
+            printf("[DEBUG|get_free_inode] Inode found: %d\n", d_ptr*BLOCK_SIZE/sizeof(inode_t)+i);
             return d_ptr*BLOCK_SIZE/sizeof(inode_t) + i; // Return ID
          }
       }
       d_ptr++;
    }
+   free(inode_block);
    return -1;
 }
 
@@ -581,7 +609,7 @@ int get_inode_id(char *name, super_block_t *sb) {
          printf("[DEBUG|get_inode_id] Search at direct ptr: %d; offset: %d\n",addr.d_ptr, addr.offset);
          if(strncmp(name, dir_block->files[addr.offset/DIR_ENTRY_SIZE].filename, FILENAME_SIZE) == 0) { // Compare filename
             printf("[DEBUG|get_inode_id] File found. Direct ptr: %d; offset: %d\n", addr.d_ptr, addr.offset);
-            inode_id = addr.d_ptr*num_entries + addr.offset;
+            inode_id = dir_block->files[addr.offset/DIR_ENTRY_SIZE].inode_id;
             printf("[DEBUG|get_inode_id] Currently looking at: \"%s\", %d\n", dir_block->files[addr.offset/DIR_ENTRY_SIZE].filename, dir_block->files[addr.offset/DIR_ENTRY_SIZE].inode_id);
             break;
          }
@@ -593,6 +621,6 @@ int get_inode_id(char *name, super_block_t *sb) {
       addr.d_ptr++;                                // Increment block count
       addr.offset = 0;                             // Reset offset
    }
-   free(dir_block);
+   free(dir_block);                                // Free                                     (6)
    return inode_id;
 }

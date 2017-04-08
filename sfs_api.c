@@ -329,8 +329,8 @@ int ssfs_fwrite(int fileID, char *buf, int length){
             return -1;
          }
          add_new_block(&fdt[fileID]->inode, inode_id, *d_ptr_id, new_block, sb, bytes_to_write);
-         //b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);
          b_id = new_block;
+         printf("[DEBUG|ssfs_fwrite] Direct pointer %d maps to %d\n", *d_ptr_id, b_id);
          if(b_id == -1) {
             free(sb);                              // Free                                      (10)
             free(WM);                              // Free                                      (11)
@@ -368,6 +368,7 @@ int ssfs_fwrite(int fileID, char *buf, int length){
       ssfs_fwrite(J_NODE, (char*) &fdt[fileID]->inode, sizeof(inode_t)); // Update inode
 //    printf("[DEBUG|ssfs_write] Bytes written: %d\n", total_bytes_written);
       printf("------------------------------------------------------\n");
+      printf("[DEBUG|ssfs_fwrite] fdt[%d]: direct pointer 6 maps to %d\n", fileID, fdt[fileID]->inode.d_ptrs[6]);
    }
 
    free(sb);                                       // Free                                      (10)
@@ -390,10 +391,9 @@ int ssfs_fread(int fileID, char *buf, int length){
    }
    while(length > 0) {
       int *d_ptr_id = &fdt[fileID]->read_ptr.d_ptr;// Index of direct pointer
-//    printf("[DEBUG|ssfs_fread] Reading fileID: %d, inode: %d, Direct pointer: %d\n", fileID, fdt[fileID]->inode_id, *d_ptr_id);
       b_ptr_t b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
       int *offset = &fdt[fileID]->read_ptr.offset;// Get offset
-//      printf(", offset: %d\n", *offset);
+      printf("[DEBUG|ssfs_fread] fdt[%d], inode: %d, Direct pointer %d maps to %d\n", fileID, fdt[fileID]->inode_id, *d_ptr_id, b_id);
 
       if(b_id == -1)
          return -1;
@@ -483,11 +483,11 @@ int ssfs_remove(char *file){
 
 b_ptr_t get_block_id(inode_t *inode, int d_ptr_id) {
    if(d_ptr_id < 0) {
-//    printf("[DEBUG|get_block_id] d_ptr_id is negative: %d\n", d_ptr_id);
+      printf("[DEBUG|get_block_id] d_ptr_id is negative: %d\n", d_ptr_id);
       return -1;
    }
-   if(d_ptr_id > (MAX_DIRECT_PTR + BLOCK_SIZE/sizeof(b_ptr_t))) {
-//    printf("[DEBUG|get_block_id] d_ptr_id is way too big: %d\n", d_ptr_id);
+   if(d_ptr_id >= (MAX_DIRECT_PTR + BLOCK_SIZE/sizeof(b_ptr_t))) {
+      printf("[DEBUG|get_block_id] d_ptr_id is way too big: %d\n", d_ptr_id);
       return -1;
    }
    if(d_ptr_id >= MAX_DIRECT_PTR) {              // Need to look into indirect ptr
@@ -515,16 +515,16 @@ b_ptr_t get_block_id(inode_t *inode, int d_ptr_id) {
 }
 
 int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block, super_block_t *sb, int write_size) {
-   if(d_ptr_id > MAX_DIRECT_PTR + BLOCK_SIZE/sizeof(b_ptr_t)) {
-//    printf("[DEBUG|add_new_block] d_ptr_id is way too big: %d\n", d_ptr_id);
+   if(d_ptr_id >= MAX_DIRECT_PTR + BLOCK_SIZE/sizeof(b_ptr_t)) {
+      printf("[DEBUG|add_new_block] d_ptr_id is way too big: %d\n", d_ptr_id);
       return -1;
    }
    if(d_ptr_id < 0) {
-//    printf("[DEBUG|add_new_block] d_ptr_id is negative\n");
+      printf("[DEBUG|add_new_block] d_ptr_id is negative\n");
       return -1;
    }
    if(sb == NULL) {
-//    printf("[DEBUG|add_new_block] sb is NULL\n");
+      printf("[DEBUG|add_new_block] sb is NULL\n");
       return -1;
    }
 
@@ -545,6 +545,7 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
 
          FBM->mask[*i_ptr] = 0;                 // Update pointer block status
          write_blocks(FBM_BLOCK, 1, FBM);       // Update FBM
+         inode->i_ptr = *i_ptr;
          if(inode_id == -1) {                   // j-node: special procedure
       //    printf("[DEBUG|add_new_block] Adding new block %d at %d in j-node\n", new_block, d_ptr_id);
             super_block_t *sb = calloc(BLOCK_SIZE, 1);

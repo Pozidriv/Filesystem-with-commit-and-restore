@@ -313,7 +313,7 @@ int ssfs_fwrite(int fileID, char *buf, int length){
          free(FBM);
          return -1;
       }
-//    printf("[DEBUG|ssfs_fwrite] fileID: %d, inode: %d, length: %d, write at: (%d,%d)\n", fileID, fdt[fileID]->inode_id, length, *d_ptr_id, *offset);
+      if(fileID != 0 && fileID != -1) printf("[DEBUG|ssfs_fwrite] fileID: %d, inode: %d, length: %d, write at: (%d,%d)\n", fileID, fdt[fileID]->inode_id, length, *d_ptr_id, *offset);
 
       // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
       int bytes_to_write = length < BLOCK_SIZE-*offset ? length : BLOCK_SIZE-*offset;
@@ -385,7 +385,7 @@ int ssfs_fread(int fileID, char *buf, int length){
 
    int total_bytes_read = 0;
    if(fdt[fileID]->inode.size < virt_addr_to_bytes(fdt[fileID]->read_ptr) + length) {
-//    printf("[DEBUG|ssfs_fread] Read too big. FS: %d, RP: (%d,%d), L: %d)\n", fdt[fileID]->inode.size, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset, length);
+      if(fileID != 0 && fileID != 1) printf("[DEBUG|ssfs_fread] Read too big. FS: %d, RP: (%d,%d), L: %d)\n", fdt[fileID]->inode.size, fdt[fileID]->read_ptr.d_ptr, fdt[fileID]->read_ptr.offset, length);
       length = fdt[fileID]->inode.size - virt_addr_to_bytes(fdt[fileID]->read_ptr);
    }
    while(length > 0) {
@@ -408,6 +408,7 @@ int ssfs_fread(int fileID, char *buf, int length){
       memcpy(buf, &current_block[*offset], bytes_to_read);
       length -= bytes_to_read;
       total_bytes_read += bytes_to_read;
+      buf = &buf[bytes_to_read];
 
       ssfs_frseek(fileID, virt_addr_to_bytes(fdt[fileID]->read_ptr) + bytes_to_read);//move rptr
       free(current_block);                         // Free                                      (17)
@@ -451,6 +452,7 @@ int ssfs_remove(char *file){
       if(block_to_free == -1) break;
       if(WM->mask[block_to_free] == 1) FBM->mask[block_to_free] = 1;
    }
+   if(inode->i_ptr != 0) FBM->mask[inode->i_ptr] = 1;
    write_blocks(FBM_BLOCK, 1, FBM);
    free(FBM);
    free(WM);
@@ -489,7 +491,7 @@ b_ptr_t get_block_id(inode_t *inode, int d_ptr_id) {
       return -1;
    }
    if(d_ptr_id >= MAX_DIRECT_PTR) {              // Need to look into indirect ptr
-//    printf("[DEBUG|get_block_id] Looking into indirect pointer: %d\n", inode->i_ptr);
+      printf("[DEBUG|get_block_id] Looking into indirect pointer: %d\n", inode->i_ptr);
       b_ptr_t i_ptr = inode->i_ptr;             // Get indirect pointer
       if(i_ptr == 0) return 0;
 
@@ -499,13 +501,13 @@ b_ptr_t get_block_id(inode_t *inode, int d_ptr_id) {
       b_ptr_t ptr = ptr_file->ptrs[d_ptr_id - MAX_DIRECT_PTR];
       free(ptr_file);                           // Free                                      (13)
       if(ptr>NUM_BLOCKS-1) {
-//       printf("[DEBUG|get_block_id] Block number out of bounds\n");
+         printf("[DEBUG|get_block_id] Block number out of bounds\n");
          return -1;
       }
       return ptr;
    }
    if(inode->d_ptrs[d_ptr_id]>NUM_BLOCKS) {
-//    printf("[DEBUG|get_block_id] Block number out of bounds\n");
+      printf("[DEBUG|get_block_id] Block number out of bounds\n");
       return -1;
    }
 
@@ -543,7 +545,7 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
 
          FBM->mask[*i_ptr] = 0;                 // Update pointer block status
          write_blocks(FBM_BLOCK, 1, FBM);       // Update FBM
-         if(inode_id == -1) {                         // j-node: special procedure
+         if(inode_id == -1) {                   // j-node: special procedure
       //    printf("[DEBUG|add_new_block] Adding new block %d at %d in j-node\n", new_block, d_ptr_id);
             super_block_t *sb = calloc(BLOCK_SIZE, 1);
             read_blocks(SUPER_BLOCK, 1, sb);
@@ -551,7 +553,7 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
             sb->current_root.i_ptr = *i_ptr;
             write_blocks(SUPER_BLOCK, 1, sb);
             free(sb);
-         } else {                                     // normal i-node procedure
+         } else {                               // normal i-node procedure
             b_ptr_t inode_block_id = get_block_id(&sb->current_root,inode_id/(BLOCK_SIZE/sizeof(inode_t)));
 
             if(inode_block_id == -1)

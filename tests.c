@@ -209,7 +209,7 @@ int test_read_all_files(int *file_id, int *file_size, char **write_buf, int num_
       fprintf(stderr, "Warning: ssfs_fread should return number of bytes read. Potential read fail?\n");
     //Compare both
     if(strcmp(buf, write_buf[i]) != 0){
-      fprintf(stderr, "Error: \nRead failed.\n\n");
+      fprintf(stderr, "Error: \nRead failed. Tried reading %d bytes starting at 0 in file %d\n\n", file_size[i], file_id[i]);
       *err_no += 1;
       printf("%d %d %d\n", strlen(buf), strlen(write_buf[i]), file_size[i]);
     }
@@ -278,8 +278,9 @@ int test_difficult_read_files(int *file_id, int *file_size, int *write_ptr, char
     temp = write_buf[index][write_ptr[index]];
     write_buf[index][write_ptr[index]] = '\0';
     if(strcmp(buf, write_buf[index] + sizeof(char) * (write_ptr[index] - read_length)) != 0){
-        fprintf(stderr, "Error: \nRead failed\n");
+        fprintf(stderr, "Read lengthError: \nRead failed. Tried reading %d in file %d, read %d\nRead:\n%s\nShould have Read:\n%s\n", read_length, file_id[index], res, buf, write_buf[index] + sizeof(char) * (write_ptr[index] - read_length));
         *err_no += 1;
+      	printf("%d %d %d\n", strlen(buf), strlen(write_buf[index] + sizeof(char)*(write_ptr[index] - read_length)), file_size[index]);
     }
     write_buf[index][write_ptr[index]] = temp;
     free(buf);
@@ -320,7 +321,7 @@ int test_random_read_files(int *file_id, int *file_size, int *write_ptr, char **
     temp = write_buf[i][start_index + read_length];
     write_buf[i][start_index + read_length] = '\0';
     if(strcmp(buf, write_buf[i] + sizeof(char) * (start_index)) != 0){
-      fprintf(stderr, "Error: \nRead failed\n");
+      fprintf(stderr, "Error: \nRead failed. Tried reading %d bytes from %d in file %d\nRead:\n%s\nShould have Read:\n%s\n", read_length, start_index, file_id[i], buf, write_buf[i] + sizeof(char) * (start_index));
       *err_no += 1;
     }
     write_buf[i][start_index + read_length] = temp;
@@ -444,11 +445,11 @@ int test_write_to_overflow(int *file_id, int *file_size, char **write_buf, int i
     if(res < 0)
           fprintf(stderr, "Warning: ssfs_frseek returned negative. Potential frseek fail?\n");
     read_length = strlen(buffer[i]);
-    if(ssfs_fread(index, read_buffer, read_length) < 0){
-        fprintf(stderr, "Error: Read Failed. \n");
+    if(ssfs_fread(file_id[index], read_buffer, read_length) < 0){
+        fprintf(stderr, "Error: Read Failed. Tried reading %d bytes starting at %d in file %d\n", read_length, start_index, file_id[index]);
         *err_no += 1;
     }else if(read_length != strlen(read_buffer)){
-        fprintf(stderr, "Error: Read length error. Expected %d but received %d\n", read_length, strlen(read_buffer));
+        fprintf(stderr, "Error: Read length error. Expected %d but received %d. FileID: %d\n", read_length, strlen(read_buffer), file_id[index]);
         *err_no += 1;
     }else if(strcmp(buffer[i], read_buffer) != 0){
         fprintf(stderr, "Error: Invalid Content Read. Expected:\n%s\nReceived:\n %s\n", buffer[i], read_buffer);

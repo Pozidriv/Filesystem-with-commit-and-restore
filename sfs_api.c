@@ -487,20 +487,21 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
       FBM->mask[new_block] = 0;
       write_blocks(FBM_BLOCK, 1, FBM);          // Update FBM
       free(FBM);
+      inode->d_ptrs[d_ptr_id] = new_block;      // Don't forget to update the in-mem inode
    } else {                                     // normal i-node procedure
       // Getting the id of the inode table block that contains our inode.
       // Since int division truncates to 0, we do inode_id/number of inodes in a block
       b_ptr_t inode_block_id = get_block_id(&sb->current_root,inode_id/(BLOCK_SIZE/sizeof(inode_t)));
 
       if(inode_block_id == -1) return -1;
-      inode_block_t *inode_block = malloc(BLOCK_SIZE);// Malloc                              (15)
-      read_blocks(inode_block_id, 1, inode_block); // Retrieve inode block
-      inode_block->inodes[inode_id % (BLOCK_SIZE/sizeof(inode_t))].d_ptrs[d_ptr_id] = new_block;
-      inode_block->inodes[inode_id % (BLOCK_SIZE/sizeof(inode_t))].size += write_size;
-      write_blocks(inode_block_id, 1, inode_block);// Update inode block
-      free(inode_block);                           // Free                                   (15)
+      inode->d_ptrs[d_ptr_id] = new_block;      // Don't forget to update the in-mem inode
+      inode_t *inode_to_write_back = calloc(sizeof(inode_t), 1);
+      *inode_to_write_back = *inode;
+      inode_to_write_back->size += write_size;
+
+      ssfs_fwseek(J_NODE, inode_id*sizeof(inode_t));
+      ssfs_fwrite(J_NODE, (char*) inode_to_write_back, sizeof(inode_t));
    }
-   inode->d_ptrs[d_ptr_id] = new_block;         // Don't forget to update the in-mem inode
 
    fbm_t *FBM = malloc(BLOCK_SIZE);
    read_blocks(FBM_BLOCK, 1, FBM);

@@ -461,7 +461,10 @@ int ssfs_remove(char *file){
       if(block_to_free == -1) break;
       if(WM->mask[block_to_free] == 1) FBM->mask[block_to_free] = 1;
    }
-   if(inode->i_ptr != 0) FBM->mask[inode->i_ptr] = 1;
+   if(inode->i_ptr != 0) {
+      printf("[DEBUG|ssfs_remove] Freeing pointer block: %d\n", inode->i_ptr);
+      FBM->mask[inode->i_ptr] = 1;
+   }
    write_blocks(FBM_BLOCK, 1, FBM);
    free(FBM);
    free(WM);
@@ -538,7 +541,7 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
    }
    char *empty_block = calloc(BLOCK_SIZE, 1);
    write_blocks(new_block, 1, empty_block);     // Wipe out block
-   printf("[add_new_block] Wrote in block %d\n", new_block);
+   printf("[add_new_block] Wrote in block %d --1--\n", new_block);
 
    if(d_ptr_id >= MAX_DIRECT_PTR) {// Need to look into indirect ptr
       printf("[DEBUG|add_new_block] Looking into indirect pointer: %d\n", inode->i_ptr);
@@ -549,7 +552,7 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
       FBM->mask[new_block] = 0;                 // Update new block
       write_blocks(FBM_BLOCK, 1, FBM);          // Update FBM
 
-      if(*i_ptr == 0 || d_ptr_id == 14) {                         // If indirect pointer not yet initialized
+      if(*i_ptr == 0 || d_ptr_id == 14) {       // If indirect pointer not yet initialized
          *i_ptr = get_unused_block();           // "create" a new pointer file
          printf("[DEBUG|add_new_block] I-node %d full. Creating pointer file at %d\n", inode_id, *i_ptr);
          if(*i_ptr == -1)
@@ -576,7 +579,7 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
             inode_block->inodes[inode_id % (BLOCK_SIZE/sizeof(inode_t))].i_ptr = inode->i_ptr;
             inode_block->inodes[inode_id % (BLOCK_SIZE/sizeof(inode_t))].size += write_size;
             write_blocks(inode_block_id, 1, inode_block);// Update inode block
-            printf("[add_new_block] Wrote in block %d\n", inode_block_id);
+            printf("[add_new_block] Wrote in block %d. Is indirect ptr for inode %d --2--\n", inode_block_id, inode_id);
             free(inode_block);                           // Free                                   (15)
          }
       }
@@ -586,7 +589,7 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
 
       ptr_file->ptrs[d_ptr_id - MAX_DIRECT_PTR] = new_block; // Update ptr
       write_blocks(*i_ptr, 1, ptr_file);        // Update pointer file
-      printf("[add_new_block] Wrote in block %d\n", *i_ptr);
+      printf("[add_new_block] Wrote in block %d. Is indirect ptr for inode %d --3--\n", *i_ptr, inode_id);
       free(ptr_file);                           // Free                                   (14)
       free(FBM);                                // Free                                   (16)
 
@@ -607,6 +610,7 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
       FBM->mask[new_block] = 0;
       write_blocks(FBM_BLOCK, 1, FBM);             // Update FBM
       free(FBM);
+      inode->d_ptrs[d_ptr_id] = new_block;         // Don't forget to update the in-mem inode
    } else {                                     // normal i-node procedure
       // Getting the id of the inode table block that contains our inode.
       // Since int division truncates to 0, we do inode_id/number of inodes in a block
@@ -614,15 +618,23 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
 
       if(inode_block_id == -1)
          return -1;
+      inode->d_ptrs[d_ptr_id] = new_block;         // Don't forget to update the in-mem inode
+      inode_t *inode_to_write_back = calloc(sizeof(inode_t), 1);
+      *inode_to_write_back = *inode;
+      inode_to_write_back->size += write_size;
+
+      ssfs_fwseek(J_NODE, inode_id*sizeof(inode_t));
+      ssfs_fwrite(J_NODE, (char*) inode_to_write_back, sizeof(inode_t));
+/*
       inode_block_t *inode_block = malloc(BLOCK_SIZE);// Malloc                              (15)
       read_blocks(inode_block_id, 1, inode_block); // Retrieve inode block
       inode_block->inodes[inode_id % (BLOCK_SIZE/sizeof(inode_t))].d_ptrs[d_ptr_id] = new_block;
       inode_block->inodes[inode_id % (BLOCK_SIZE/sizeof(inode_t))].size += write_size;
       write_blocks(inode_block_id, 1, inode_block);// Update inode block
-      printf("[add_new_block] Wrote in block %d\n", inode_block_id);
+      printf("[add_new_block] Wrote in block %d --4--\n", inode_block_id);
       free(inode_block);                           // Free                                   (15)
+*/
    }
-   inode->d_ptrs[d_ptr_id] = new_block;         // Don't forget to update the in-mem inode
 // inode->size += write_size;                   // Done in caller
 
    fbm_t *FBM = malloc(BLOCK_SIZE);

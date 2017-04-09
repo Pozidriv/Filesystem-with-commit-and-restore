@@ -7,13 +7,13 @@
 #define BLOCK_SIZE 1024             // Block size in bytes
 #define NUM_BLOCKS 1024             // Number of block in the file system
 #define MAGIC 0xACBD0005            // Magic number
-#define NUM_SHADOW_ROOTS 16         // Maximum number of shadow roots
+#define NUM_SHADOW_ROOTS 14         // Maximum number of shadow roots
 
 #define MAX_DIRECT_PTR 14           // Maximum number of direct pointers in an i/j-node stuct
 
 #define SUPER_BLOCK 0               // Location of superblock on disk
-#define FBM_BLOCK 1                 // Location of file bit mask on disk
-#define WM_BLOCK 2                  // Location of write mask on disk
+#define DEFAULT_FBM_BLOCK 1         // Location of file bit mask on disk
+#define DEFAULT_WM_BLOCK 2          // Location of write mask on disk
 #define DEFAULT_INODE_TABLE_BLOCK 3 // Location of the very first inode table
 #define DEFAULT_ROOT_DIR_BLOCK 4    // Location of root dir on disk init
 
@@ -54,8 +54,10 @@ typedef struct _super_block {
    int block_size;                  // 
    int num_blocks;                  //
    int num_inodes;                  //
-   inode_t current_root;            //
+   int current_root;                //
    inode_t roots[NUM_SHADOW_ROOTS]; // Array of shadow roots
+   b_ptr_t wm_ptrs[NUM_SHADOW_ROOTS];
+   b_ptr_t fbm_ptrs[NUM_SHADOW_ROOTS];
 } super_block_t;
 
 typedef struct _fbm_t {             // File Bit Mask
@@ -97,6 +99,71 @@ fd_t *fdt[NUM_BLOCKS];              // File descriptor table
 
 /**************************************************************************/
 
+int ssfs_commit() {
+   super_block_t *sb = calloc(BLOCK_SIZE, 1);
+   read_blocks(SUPER_BLOCK, 1, sb);
+   if(sb->current_root >= NUM_SHADOW_ROOTS) {
+      printf("[DEBUG|ssfs_commit] Max number of shadow roots exceeded. Aborting\n");
+      free(sb);
+      return -1;
+   }
+
+   wm_t *WM = calloc(BLOCK_SIZE, 1);
+   read_blocks(sb->wm_ptrs[sb->current_root], 1, WM);
+   fbm_t *FBM = calloc(BLOCK_SIZE, 1);
+   read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
+   
+   b_ptr_t new_WM_block = get_unused_block();
+   if(new_WM_block == -1) {
+      printf("[DEBUG|ssfs_commit] Block allocation for new WM block failed. Aborting\n");
+      return -1;
+   }
+   FBM->mask[new_WM_block] = 0;
+   write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
+
+   b_ptr_t new_FBM_block = get_unused_block();
+   if(new_FBM_block == -1) {
+      printf("[DEBUG|ssfs_commit] Block allocation for new FBM block failed. Aborting\n");
+      return -1;
+   }
+   FBM->mask[new_WM_block] = 0;
+   write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
+
+   sb->wm_ptrs[sb->current_root+1] = new_WM_block;
+   sb->fbm_ptrs[sb->current_root+1] = new_FBM_block;
+
+   // Procede to mark all currently used blocks as read-only
+   for(int i=0; i<BLOCK_SIZE; i++) {
+      if(FBM->mask[i] == 0) WM->mask[i] = 0; 
+   }
+
+   sb->roots[sb->current_root+1] = sb->roots[sb->current_root]; // Copy current root
+   sb->current_root++;              // Update current root number
+   write_blocks(sb->wm_ptrs[sb->current_root], 1, WM);   // Write new WM
+   write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM); // Write new FBM
+   write_blocks(SUPER_BLOCK, 1, sb);
+   
+   free(sb);
+   free(WM);
+   free(FBM);
+   return sb->current_root-1;
+}
+
+int ssfs_restore(int cnum) {
+   if(cnum < 0 || cnum > NUM_SHADOW_ROOTS) {
+      printf("[DEBUG|ssfs_restore] cnum is out of bounds... wtf are you trying to do?\n");
+      return -1;
+   }
+
+   super_block_t *sb = calloc(BLOCK_SIZE, 1);
+   read_blocks(SUPER_BLOCK, 1, sb);
+   sb->current_root = cnum;
+   write_blocks(SUPER_BLOCK, 1, sb);
+   free(sb);
+   
+   return 0;
+}
+
 void mkssfs(int fresh){
    if(fresh == 1) {              // Fresh disk -> need to perform first time setup
       if(init_fresh_disk("placeholder", BLOCK_SIZE, NUM_BLOCKS) == -1)
@@ -109,7 +176,7 @@ void mkssfs(int fresh){
       sb->block_size = BLOCK_SIZE;
       sb->num_blocks = NUM_BLOCKS;
       sb->num_inodes = 1;                          // We start with 1 i-node for the root dir
-      sb->current_root.size = sizeof(inode_t);     // Root is thus of size inode_t ??????
+      sb->roots[sb->current_root].size = sizeof(inode_t);     // Root is thus of size inode_t ??????
 
       // Creating root dir inode and placing it in first i-node block
       inode_block_t *ib = calloc(BLOCK_SIZE, 1);   // Allocate a block for the inodes         (4)
@@ -117,13 +184,16 @@ void mkssfs(int fresh){
 //    ib->inodes[0].size = 0;                           // Not necessary (calloc)
       write_blocks(DEFAULT_INODE_TABLE_BLOCK, 1, ib);   // Write inode table
 
-      sb->current_root.d_ptrs[0] = DEFAULT_INODE_TABLE_BLOCK; // Point to first inode table block
+      sb->roots[sb->current_root].d_ptrs[0] = DEFAULT_INODE_TABLE_BLOCK; // Point to first inode table block
 
       // Write current root to fdt[0]. It's a special entry, so we don't care if id is 0
-      new_fdt_entry(sb->current_root, -1);         // Add root in FDT (at index 0)
+      new_fdt_entry(sb->roots[sb->current_root], -1);         // Add root in FDT (at index 0)
 
       new_fdt_entry(ib->inodes[0], 0);             // Add root dir in FDT (at index 1)
       free(ib);                                    // Free                                    (4)
+
+      sb->wm_ptrs[sb->current_root] = DEFAULT_WM_BLOCK;
+      sb->fbm_ptrs[sb->current_root] = DEFAULT_FBM_BLOCK;
 
       write_blocks(SUPER_BLOCK, 1, sb);            // Write the superblock
       free(sb);                                    // Free                                    (1)
@@ -133,21 +203,21 @@ void mkssfs(int fresh){
 
       memset(FBM->mask, 1, NUM_BLOCKS);            // Set the whole FBM to 1
       FBM->mask[SUPER_BLOCK] = 0;
-      FBM->mask[FBM_BLOCK] = 0;
-      FBM->mask[WM_BLOCK] = 0;                     // This is not yet used, but will be shortly!
+      FBM->mask[DEFAULT_FBM_BLOCK] = 0;
+      FBM->mask[DEFAULT_WM_BLOCK] = 0;             // This is not yet used, but will be shortly!
       FBM->mask[DEFAULT_INODE_TABLE_BLOCK] = 0;
       FBM->mask[DEFAULT_ROOT_DIR_BLOCK] = 0;
 
-      write_blocks(FBM_BLOCK, 1, FBM);             // Write the FBM
+      write_blocks(DEFAULT_FBM_BLOCK, 1, FBM);     // Write the FBM
       free(FBM);                                   // Free                                    (2)
 
       // Create WM
       wm_t *WM = calloc(BLOCK_SIZE, 1);            // Allocate a whole block for the WM       (3)
 
       memset(WM->mask, 1, NUM_BLOCKS);             // Set the whole WM to 1
-      WM->mask[DEFAULT_ROOT_DIR_BLOCK] = 0;        // Set the root dir to be read-only
+//    WM->mask[DEFAULT_ROOT_DIR_BLOCK] = 0;        // Set the root dir to be read-only
 
-      write_blocks(WM_BLOCK, 1, WM);               // Write the WM
+      write_blocks(DEFAULT_WM_BLOCK, 1, WM);       // Write the WM
       free(WM);                                    // Free                                    (3)
    } else {                      // Else assume it's already setup
       if(init_disk("placeholder", BLOCK_SIZE, NUM_BLOCKS) == -1)
@@ -157,7 +227,7 @@ void mkssfs(int fresh){
       read_blocks(SUPER_BLOCK, 1, sb);
 
       // Write current root to fdt[0]. It's a special entry, so we don't care if id is 0
-      new_fdt_entry(sb->current_root, -1);         // Add root in FDT (at index 0)
+      new_fdt_entry(sb->roots[sb->current_root], -1);  // Add root in FDT (at index 0)
 
       // Retrieve root dir inode
       inode_t *root_dir_inode = calloc(sizeof(inode_t), 1);                                  //1
@@ -191,7 +261,7 @@ int ssfs_fopen(char *name){
       if(inode_id == -1)                           // Means inode is appended at the end
          inode_id = sb->num_inodes;
 
-      sb->current_root.size += sizeof(inode_t);    //
+      sb->roots[sb->current_root].size += sizeof(inode_t);    //
       if(ssfs_fwseek(J_NODE, inode_id*sizeof(inode_t)) < 0) return -1;
       if(ssfs_fwrite(J_NODE, (char*) inode, sizeof(inode_t)) <= 0) return -1;// Write inode to appropriate block
       sb->num_inodes++;                            // Update inode count
@@ -249,9 +319,9 @@ int ssfs_fwrite(int fileID, char *buf, int length){
    super_block_t *sb = malloc(BLOCK_SIZE);         // malloc                                    (10)
    read_blocks(SUPER_BLOCK, 1, sb);                // Retrieve super block: sb
    wm_t *WM = malloc(BLOCK_SIZE);                  // malloc                                    (11)
-   read_blocks(WM_BLOCK, 1, WM);                   // Retrieve WM:          WM
+   read_blocks(sb->wm_ptrs[sb->current_root], 1, WM);   // Retrieve WM:          WM
    wm_t *FBM = malloc(BLOCK_SIZE);                 // malloc                                    (12)
-   read_blocks(FBM_BLOCK, 1, FBM);                 // Retrieve FBM:         FBM
+   read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM); // Retrieve FBM:         FBM
    int inode_id = fdt[fileID]->inode_id;           // Get inode ID
 
    while(length > 0) {                             // While there are bytes to write
@@ -363,8 +433,8 @@ int ssfs_remove(char *file){
 
    fbm_t *FBM = malloc(BLOCK_SIZE);                                                             //4
    wm_t *WM = malloc(BLOCK_SIZE);                  // Necessary for read-only blocks            //5
-   read_blocks(FBM_BLOCK, 1, FBM);
-   read_blocks(WM_BLOCK, 1, WM);
+   read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
+   read_blocks(sb->wm_ptrs[sb->current_root], 1, WM);
    ssfs_frseek(J_NODE, inode_id*sizeof(inode_t));
    inode_t *inode = malloc(sizeof(inode_t));                                                    //6
    ssfs_fread(J_NODE, (char*) inode, sizeof(inode_t));  // Retrieve inode
@@ -376,7 +446,7 @@ int ssfs_remove(char *file){
       if(WM->mask[block_to_free] == 1) FBM->mask[block_to_free] = 1;
    }
    if(inode->i_ptr != 0) FBM->mask[inode->i_ptr] = 1;
-   write_blocks(FBM_BLOCK, 1, FBM);
+   write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
    free(FBM);                                                                                   //4
    free(WM);                                                                                    //5
    free(inode);                                                                                 //6
@@ -436,9 +506,9 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
       b_ptr_t *i_ptr = &inode->i_ptr;           // Get indirect pointer
 
       wm_t *FBM = malloc(BLOCK_SIZE);           // malloc                                 (16)
-      read_blocks(FBM_BLOCK, 1, FBM);           // Retrieve FBM
+      read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);           // Retrieve FBM
       FBM->mask[new_block] = 0;                 // Update new block
-      write_blocks(FBM_BLOCK, 1, FBM);          // Update FBM
+      write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);          // Update FBM
 
       if(*i_ptr == 0 || d_ptr_id == 14) {                         // If indirect pointer not yet initialized
          *i_ptr = get_unused_block();           // "create" a new pointer file
@@ -448,16 +518,16 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
          }
 
          FBM->mask[*i_ptr] = 0;                 // Update pointer block status
-         write_blocks(FBM_BLOCK, 1, FBM);       // Update FBM
+         write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);       // Update FBM
          inode->i_ptr = *i_ptr;
          if(inode_id == -1) {                   // j-node: special procedure
             super_block_t *sb = calloc(BLOCK_SIZE, 1);                                    //10
             read_blocks(SUPER_BLOCK, 1, sb);
-            sb->current_root.i_ptr = *i_ptr;
+            sb->roots[sb->current_root].i_ptr = *i_ptr;
             write_blocks(SUPER_BLOCK, 1, sb);
             free(sb);                                                                     //10
          } else {                               // normal i-node procedure
-            b_ptr_t inode_block_id = get_block_id(&sb->current_root,inode_id/(BLOCK_SIZE/sizeof(inode_t)));
+            b_ptr_t inode_block_id = get_block_id(&sb->roots[sb->current_root],inode_id/(BLOCK_SIZE/sizeof(inode_t)));
 
             if(inode_block_id == -1) {
                free(FBM);                       // Free                                   (16)
@@ -486,19 +556,19 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
       super_block_t *sb = calloc(BLOCK_SIZE, 1);                                          //11
       read_blocks(SUPER_BLOCK, 1, sb);
       
-      sb->current_root.d_ptrs[d_ptr_id] = new_block;
+      sb->roots[sb->current_root].d_ptrs[d_ptr_id] = new_block;
       write_blocks(SUPER_BLOCK, 1, sb);
-      free(sb);                                                                           //11
       fbm_t *FBM = malloc(BLOCK_SIZE);                                                    //12
-      read_blocks(FBM_BLOCK, 1, FBM);
+      read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
       FBM->mask[new_block] = 0;
-      write_blocks(FBM_BLOCK, 1, FBM);          // Update FBM
+      write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);          // Update FBM
       free(FBM);                                                                          //12
+      free(sb);                                                                           //11
       inode->d_ptrs[d_ptr_id] = new_block;      // Don't forget to update the in-mem inode
    } else {                                     // normal i-node procedure
       // Getting the id of the inode table block that contains our inode.
       // Since int division truncates to 0, we do inode_id/number of inodes in a block
-      b_ptr_t inode_block_id = get_block_id(&sb->current_root,inode_id/(BLOCK_SIZE/sizeof(inode_t)));
+      b_ptr_t inode_block_id = get_block_id(&sb->roots[sb->current_root],inode_id/(BLOCK_SIZE/sizeof(inode_t)));
 
       if(inode_block_id == -1) return -1;
       inode->d_ptrs[d_ptr_id] = new_block;      // Don't forget to update the in-mem inode
@@ -512,9 +582,9 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
    }
 
    fbm_t *FBM = malloc(BLOCK_SIZE);
-   read_blocks(FBM_BLOCK, 1, FBM);
+   read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
    FBM->mask[new_block] = 0;
-   write_blocks(FBM_BLOCK, 1, FBM);             // Update FBM
+   write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);             // Update FBM
    free(FBM);
 
    return 0;
@@ -547,8 +617,11 @@ int new_fdt_entry(inode_t inode, int inode_id) {// Creates a new entry in the FD
 }
 
 b_ptr_t get_unused_block() {   // Gets an unused block (according to some strategy)
+   super_block_t *sb = calloc(BLOCK_SIZE, 1);
+   read_blocks(SUPER_BLOCK, 1, sb);
    wm_t *FBM = malloc(BLOCK_SIZE);
-   read_blocks(FBM_BLOCK, 1, FBM);
+   read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
+   free(sb);
 
    for(int i=0; i<BLOCK_SIZE; i++) {
       if(FBM->mask[i] == 1) {

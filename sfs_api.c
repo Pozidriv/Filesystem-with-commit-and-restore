@@ -153,20 +153,20 @@ void mkssfs(int fresh){
       if(init_disk("placeholder", BLOCK_SIZE, NUM_BLOCKS) == -1)
          exit(-1);
 
-      super_block_t *sb = calloc(BLOCK_SIZE, 1);
+      super_block_t *sb = calloc(BLOCK_SIZE, 1);                                             //2
       read_blocks(SUPER_BLOCK, 1, sb);
 
       // Write current root to fdt[0]. It's a special entry, so we don't care if id is 0
       new_fdt_entry(sb->current_root, -1);         // Add root in FDT (at index 0)
 
       // Retrieve root dir inode
-      inode_t *root_dir_inode = calloc(sizeof(inode_t), 1);
+      inode_t *root_dir_inode = calloc(sizeof(inode_t), 1);                                  //1
       ssfs_frseek(J_NODE, 0);
       ssfs_fread(J_NODE, (char*) root_dir_inode, sizeof(inode_t));
 
       new_fdt_entry(*root_dir_inode, 0);           // Add root dir in FDT (at index 1)
-      free(root_dir_inode); 
-      free(sb);
+      free(root_dir_inode);                                                                  //1
+      free(sb);                                                                              //2
    }
 }
 
@@ -259,9 +259,9 @@ int ssfs_fwrite(int fileID, char *buf, int length){
       b_ptr_t b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
       int *offset = &fdt[fileID]->write_ptr.offset;// Get offset
       if(b_id == -1) {
-         free(sb);
-         free(WM);
-         free(FBM);
+         free(sb);                                 // Free                                      (10)
+         free(WM);                                 // Free                                      (11)
+         free(FBM);                                // Free                                      (12)
          return -1;
       }
       // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
@@ -346,12 +346,13 @@ int ssfs_fread(int fileID, char *buf, int length){
 }
 
 int ssfs_remove(char *file){
-   super_block_t *sb = malloc(BLOCK_SIZE);
+   super_block_t *sb = malloc(BLOCK_SIZE);         // malloc                                    //3
    read_blocks(SUPER_BLOCK, 1, sb);
    int inode_id = get_inode_id(file, sb);
 
    if(inode_id == -1) {
       printf("[DEBUG|ssfs_remove] File not found. Aborting\n");
+      free(sb);                                                                                 //3
       return -1;
    }
 
@@ -360,12 +361,12 @@ int ssfs_remove(char *file){
       if(inode_id == fdt[i]->inode_id) ssfs_fclose(i);   // Close if is an entry for our file
    }
 
-   fbm_t *FBM = malloc(BLOCK_SIZE);
-   wm_t *WM = malloc(BLOCK_SIZE);                  // Necessary for read-only blocks
+   fbm_t *FBM = malloc(BLOCK_SIZE);                                                             //4
+   wm_t *WM = malloc(BLOCK_SIZE);                  // Necessary for read-only blocks            //5
    read_blocks(FBM_BLOCK, 1, FBM);
    read_blocks(WM_BLOCK, 1, WM);
    ssfs_frseek(J_NODE, inode_id*sizeof(inode_t));
-   inode_t *inode = malloc(sizeof(inode_t));
+   inode_t *inode = malloc(sizeof(inode_t));                                                    //6
    ssfs_fread(J_NODE, (char*) inode, sizeof(inode_t));  // Retrieve inode
 
    // Time to free everything we gave to the inode
@@ -376,11 +377,11 @@ int ssfs_remove(char *file){
    }
    if(inode->i_ptr != 0) FBM->mask[inode->i_ptr] = 1;
    write_blocks(FBM_BLOCK, 1, FBM);
-   free(FBM);
-   free(WM);
-   free(inode);
+   free(FBM);                                                                                   //4
+   free(WM);                                                                                    //5
+   free(inode);                                                                                 //6
 
-   inode_t *unused_inode = calloc(sizeof(inode_t), 1);
+   inode_t *unused_inode = calloc(sizeof(inode_t), 1);                                          //7
    unused_inode->size = -1;                        // Indicate inode is unused
 
    ssfs_fwseek(J_NODE, inode_id*sizeof(inode_t));  // Move write pointer of current root to inode
@@ -389,13 +390,13 @@ int ssfs_remove(char *file){
    write_blocks(SUPER_BLOCK, 1, sb);
 
    // Removing directory entry
-   char *empty_array = calloc(DIR_ENTRY_SIZE, 1);
+   char *empty_array = calloc(DIR_ENTRY_SIZE, 1);                                               //8
    ssfs_fwseek(ROOT_DIR, (inode_id-1)*DIR_ENTRY_SIZE);
    ssfs_fwrite(ROOT_DIR, empty_array, DIR_ENTRY_SIZE);
 
-   free(empty_array);
-   free(unused_inode);
-   free(sb);
+   free(empty_array);                                                                           //8
+   free(unused_inode);                                                                          //7
+   free(sb);                                                                                    //3
    return 0;
 }
 
@@ -427,8 +428,9 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
    if(d_ptr_id >= MAX_DIRECT_PTR + BLOCK_SIZE/sizeof(b_ptr_t) || sb == NULL || d_ptr_id < 0)
       return -1;
 
-   char *empty_block = calloc(BLOCK_SIZE, 1);
+   char *empty_block = calloc(BLOCK_SIZE, 1);                                             //9
    write_blocks(new_block, 1, empty_block);     // Wipe out block
+   free(empty_block);                                                                     //9
 
    if(d_ptr_id >= MAX_DIRECT_PTR) {// Need to look into indirect ptr
       b_ptr_t *i_ptr = &inode->i_ptr;           // Get indirect pointer
@@ -440,22 +442,27 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
 
       if(*i_ptr == 0 || d_ptr_id == 14) {                         // If indirect pointer not yet initialized
          *i_ptr = get_unused_block();           // "create" a new pointer file
-         if(*i_ptr == -1) return -1;
+         if(*i_ptr == -1) {
+            free(FBM);                          // Free                                   (16)
+            return -1;
+         }
 
          FBM->mask[*i_ptr] = 0;                 // Update pointer block status
          write_blocks(FBM_BLOCK, 1, FBM);       // Update FBM
          inode->i_ptr = *i_ptr;
          if(inode_id == -1) {                   // j-node: special procedure
-            super_block_t *sb = calloc(BLOCK_SIZE, 1);
+            super_block_t *sb = calloc(BLOCK_SIZE, 1);                                    //10
             read_blocks(SUPER_BLOCK, 1, sb);
             sb->current_root.i_ptr = *i_ptr;
             write_blocks(SUPER_BLOCK, 1, sb);
-            free(sb);
+            free(sb);                                                                     //10
          } else {                               // normal i-node procedure
             b_ptr_t inode_block_id = get_block_id(&sb->current_root,inode_id/(BLOCK_SIZE/sizeof(inode_t)));
 
-            if(inode_block_id == -1)
+            if(inode_block_id == -1) {
+               free(FBM);                       // Free                                   (16)
                return -1;
+            }
             inode_block_t *inode_block = malloc(BLOCK_SIZE);// Malloc                              (15)
             read_blocks(inode_block_id, 1, inode_block); // Retrieve inode block
             inode_block->inodes[inode_id % (BLOCK_SIZE/sizeof(inode_t))].i_ptr = inode->i_ptr;
@@ -476,17 +483,17 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
    }
 
    if(inode_id == -1) {                         // j-node: special procedure
-      super_block_t *sb = calloc(BLOCK_SIZE, 1);
+      super_block_t *sb = calloc(BLOCK_SIZE, 1);                                          //11
       read_blocks(SUPER_BLOCK, 1, sb);
       
       sb->current_root.d_ptrs[d_ptr_id] = new_block;
       write_blocks(SUPER_BLOCK, 1, sb);
-      free(sb);
-      fbm_t *FBM = malloc(BLOCK_SIZE);
+      free(sb);                                                                           //11
+      fbm_t *FBM = malloc(BLOCK_SIZE);                                                    //12
       read_blocks(FBM_BLOCK, 1, FBM);
       FBM->mask[new_block] = 0;
       write_blocks(FBM_BLOCK, 1, FBM);          // Update FBM
-      free(FBM);
+      free(FBM);                                                                          //12
       inode->d_ptrs[d_ptr_id] = new_block;      // Don't forget to update the in-mem inode
    } else {                                     // normal i-node procedure
       // Getting the id of the inode table block that contains our inode.
@@ -495,12 +502,13 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
 
       if(inode_block_id == -1) return -1;
       inode->d_ptrs[d_ptr_id] = new_block;      // Don't forget to update the in-mem inode
-      inode_t *inode_to_write_back = calloc(sizeof(inode_t), 1);
+      inode_t *inode_to_write_back = calloc(sizeof(inode_t), 1);                          //13
       *inode_to_write_back = *inode;
       inode_to_write_back->size += write_size;
 
       ssfs_fwseek(J_NODE, inode_id*sizeof(inode_t));
       ssfs_fwrite(J_NODE, (char*) inode_to_write_back, sizeof(inode_t));
+      free(inode_to_write_back);                                                          //13
    }
 
    fbm_t *FBM = malloc(BLOCK_SIZE);

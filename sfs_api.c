@@ -437,7 +437,6 @@ int ssfs_fread(int fileID, char *buf, int length){
       char *current_block = calloc(BLOCK_SIZE, 1); // Allocate a whole block                    (17) 
       read_blocks(b_id, 1, current_block);         // Retrieve current_block
 
-      printf("block: %d\n", b_id);
       // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
       int bytes_to_read = length < BLOCK_SIZE-*offset ? length : BLOCK_SIZE-*offset;
       memcpy(buf, &current_block[*offset], bytes_to_read);// Perform read

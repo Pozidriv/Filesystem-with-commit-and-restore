@@ -126,7 +126,7 @@ int ssfs_commit() {
       printf("[DEBUG|ssfs_commit] Block allocation for new FBM block failed. Aborting\n");
       return -1;
    }
-   FBM->mask[new_WM_block] = 0;
+   FBM->mask[new_FBM_block] = 0;
    write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
 
    sb->wm_ptrs[sb->current_root+1] = new_WM_block;
@@ -143,10 +143,11 @@ int ssfs_commit() {
    write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM); // Write new FBM
    write_blocks(SUPER_BLOCK, 1, sb);
    
+   int num = sb->current_root-1;
    free(sb);
    free(WM);
    free(FBM);
-   return sb->current_root-1;
+   return num;
 }
 
 int ssfs_restore(int cnum) {
@@ -157,8 +158,29 @@ int ssfs_restore(int cnum) {
 
    super_block_t *sb = calloc(BLOCK_SIZE, 1);
    read_blocks(SUPER_BLOCK, 1, sb);
+   if(sb->roots[cnum].size <= 0) {
+      printf("[DEBUG|ssfs_restore] This version does not exist yet.\n");
+      free(sb);
+      return -1;
+   }
    sb->current_root = cnum;
    write_blocks(SUPER_BLOCK, 1, sb);
+   fdt[0]->inode = sb->roots[sb->current_root];
+   ssfs_frseek(J_NODE, 0);
+   for(int i=0; i<sb->roots[sb->current_root].size/sizeof(inode_t); i++) {
+      inode_t *inode = malloc(sizeof(inode_t));
+      ssfs_fread(J_NODE, (char*)inode, sizeof(inode_t));
+      if(inode->size >= 0) {
+         for(int j=0; j<NUM_BLOCKS; j++) {
+            if(fdt[j] == NULL) continue;
+            if(fdt[j]->inode_id == i) {
+               printf("Updating inode %d\n", i);
+               fdt[j]->inode = *inode;
+            }
+         }
+      }
+      free(inode);
+   }
    free(sb);
    
    return 0;
@@ -329,33 +351,47 @@ int ssfs_fwrite(int fileID, char *buf, int length){
       b_ptr_t b_id = get_block_id(&fdt[fileID]->inode, *d_ptr_id);// Convert it to block pointer
       int *offset = &fdt[fileID]->write_ptr.offset;// Get offset
       if(b_id == -1) {
-         free(sb);                                 // Free                                      (10)
-         free(WM);                                 // Free                                      (11)
-         free(FBM);                                // Free                                      (12)
+         free(sb);                                 // Free           (10)
+         free(WM);                                 // Free           (11)
+         free(FBM);                                // Free           (12)
          return -1;
       }
       // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
       int bytes_to_write = length < BLOCK_SIZE-*offset ? length : BLOCK_SIZE-*offset;
 
-      if(b_id == 0) {                              // This means we need to write to a new block
+      if(b_id == 0) {                              // This means we need to wrio a new block
          b_ptr_t new_block = get_unused_block();   // Get a free block to write the rest
          if(new_block == -1) {
-            free(sb);                              // Free                                      (10)
-            free(WM);                              // Free                                      (11)
-            free(FBM);                             // Free                                      (12)
+            free(sb);                              // Free           (10)
+            free(WM);                              // Free           (11)
+            free(FBM);                             // Free           (12)
             return -1;
          }
          add_new_block(&fdt[fileID]->inode, inode_id, *d_ptr_id, new_block, sb, bytes_to_write);
          b_id = new_block;
          if(b_id == -1) {
-            free(sb);                              // Free                                      (10)
-            free(WM);                              // Free                                      (11)
-            free(FBM);                             // Free                                      (12)
+            free(sb);                              // Free           (10)
+            free(WM);                              // Free           (11)
+            free(FBM);                             // Free           (12)
             return -1;
          }
       }
       if(WM->mask[b_id] == 0) {                    // If block is not writable
-         // Do something
+         b_ptr_t new_block = get_unused_block();
+         if(new_block == -1) {
+            free(sb);                              // Free           (10)
+            free(WM);                              // Free           (11)
+            free(FBM);                             // Free           (12)
+            return -1;
+         }
+         char *old_block = calloc(BLOCK_SIZE, 1);
+         ssfs_frseek(fileID, (*d_ptr_id)*BLOCK_SIZE);
+         ssfs_fread(fileID, old_block, BLOCK_SIZE);// Retrieve old block
+         add_new_block(&fdt[fileID]->inode, inode_id, *d_ptr_id, new_block, sb, bytes_to_write);
+
+         memcpy(&old_block[*offset], buf, bytes_to_write);// Copy on write
+         write_blocks(new_block, 1, old_block);    // Write to new block
+         free(old_block);
       }
       char *current_block = calloc(BLOCK_SIZE, 1); // Allocate a whole block                     (9)
       read_blocks(b_id, 1, current_block);         // Retrieve current_block
@@ -501,16 +537,14 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
    char *empty_block = calloc(BLOCK_SIZE, 1);                                             //9
    write_blocks(new_block, 1, empty_block);     // Wipe out block
    free(empty_block);                                                                     //9
+   wm_t *FBM = malloc(BLOCK_SIZE);           // malloc                                 (16)
+   read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);           // Retrieve FBM
+   FBM->mask[new_block] = 0;                 // Update new block
+   write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);          // Update FBM
 
    if(d_ptr_id >= MAX_DIRECT_PTR) {// Need to look into indirect ptr
       b_ptr_t *i_ptr = &inode->i_ptr;           // Get indirect pointer
-
-      wm_t *FBM = malloc(BLOCK_SIZE);           // malloc                                 (16)
-      read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);           // Retrieve FBM
-      FBM->mask[new_block] = 0;                 // Update new block
-      write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);          // Update FBM
-
-      if(*i_ptr == 0 || d_ptr_id == 14) {                         // If indirect pointer not yet initialized
+      if(*i_ptr == 0 || d_ptr_id == 14) {       // If indirect pointer not yet initialized
          *i_ptr = get_unused_block();           // "create" a new pointer file
          if(*i_ptr == -1) {
             free(FBM);                          // Free                                   (16)
@@ -581,7 +615,6 @@ int add_new_block(inode_t *inode, int inode_id, int d_ptr_id, b_ptr_t new_block,
       free(inode_to_write_back);                                                          //13
    }
 
-   fbm_t *FBM = malloc(BLOCK_SIZE);
    read_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);
    FBM->mask[new_block] = 0;
    write_blocks(sb->fbm_ptrs[sb->current_root], 1, FBM);             // Update FBM

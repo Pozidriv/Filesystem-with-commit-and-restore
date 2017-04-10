@@ -174,7 +174,6 @@ int ssfs_restore(int cnum) {
          for(int j=0; j<NUM_BLOCKS; j++) {
             if(fdt[j] == NULL) continue;
             if(fdt[j]->inode_id == i) {
-               printf("Updating inode %d\n", i);
                fdt[j]->inode = *inode;
             }
          }
@@ -392,13 +391,14 @@ int ssfs_fwrite(int fileID, char *buf, int length){
          memcpy(&old_block[*offset], buf, bytes_to_write);// Copy on write
          write_blocks(new_block, 1, old_block);    // Write to new block
          free(old_block);
-      }
-      char *current_block = calloc(BLOCK_SIZE, 1); // Allocate a whole block                     (9)
-      read_blocks(b_id, 1, current_block);         // Retrieve current_block
+      } else {
+         char *current_block = calloc(BLOCK_SIZE, 1); // Allocate a whole block                     (9)
+         read_blocks(b_id, 1, current_block);         // Retrieve current_block
 
-      memcpy(&current_block[*offset], buf, bytes_to_write);// Write to block
-      write_blocks(b_id, 1, current_block);        // Write block to disk
-      free(current_block);                         // Free                                       (9)
+         memcpy(&current_block[*offset], buf, bytes_to_write);// Write to block
+         write_blocks(b_id, 1, current_block);        // Write block to disk
+         free(current_block);                         // Free                                       (9)
+      }
 
       // Need to update offset, block num, length, buf
       buf = buf + bytes_to_write;                  // Update buf
@@ -437,6 +437,7 @@ int ssfs_fread(int fileID, char *buf, int length){
       char *current_block = calloc(BLOCK_SIZE, 1); // Allocate a whole block                    (17) 
       read_blocks(b_id, 1, current_block);         // Retrieve current_block
 
+      printf("block: %d\n", b_id);
       // bytes to write = min(length, BLOCK_SIZE - offset of current write pointer)
       int bytes_to_read = length < BLOCK_SIZE-*offset ? length : BLOCK_SIZE-*offset;
       memcpy(buf, &current_block[*offset], bytes_to_read);// Perform read

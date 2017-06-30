@@ -1,8 +1,16 @@
 # OS_Project
 A simple shadow filesystem. Should work well. Commit and restore seems to work, but no guarantees on that.
-To compile for a baisc test: ```make test1```
-To compile for a stress test: ```make test2```
-To compile for an interactive test: ```make mytest```
+To compile for a baisc test: 
+
+```make test1```
+
+To compile for a stress test: 
+
+```make test2```
+
+To compile for an interactive test: 
+
+```make mytest```
 
 
 There is one edge case where the filesystem might have undefined behavior:
